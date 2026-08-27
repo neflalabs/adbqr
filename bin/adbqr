@@ -40,7 +40,6 @@ GREEN='\033[32m'
 YELLOW='\033[33m'
 BLUE='\033[34m'
 CYAN='\033[36m'
-MAGENTA='\033[35m'
 RESET='\033[0m'
 
 # Initialize config directory
@@ -282,7 +281,8 @@ term_query() {
     old=$(stty -g </dev/tty 2>/dev/null) || return 1
     stty -echo -icanon </dev/tty 2>/dev/null || { stty "$old" </dev/tty 2>/dev/null; return 1; }
     printf '%s\033[c' "$1" >/dev/tty
-    IFS= read -rs -t 1 -d c resp </dev/tty || true
+    # shellcheck disable=SC2034
+    IFS= read -rs -t 1 -d 'c' resp </dev/tty || true
     stty "$old" </dev/tty 2>/dev/null
     printf '%s' "$resp"
 }
@@ -355,6 +355,7 @@ stream_discover_mdns() {
             if read -r -t 0.1 -u 3 line; then
                 if [[ "$line" == "=;"* ]]; then
                     local status iface proto name type domain host ip port txt
+                    # shellcheck disable=SC2034
                     IFS=';' read -r status iface proto name type domain host ip port txt <<< "$line"
                     if [ "$proto" = "IPv4" ] && [ -n "$ip" ] && [ -n "$port" ]; then
                         if [ -n "$target_name" ] && [ "$name" != "$target_name" ]; then
@@ -544,6 +545,7 @@ flow_quick_connect() {
     local models=()
 
     if command -v avahi-browse >/dev/null 2>&1; then
+        # shellcheck disable=SC2034
         while IFS=';' read -r status iface proto name type domain host ip port txt; do
             if [ "$status" = "=" ] && [ "$proto" = "IPv4" ] && [ -n "$ip" ] && [ -n "$port" ]; then
                 local parsed

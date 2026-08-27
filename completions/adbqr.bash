@@ -10,15 +10,16 @@ _adbqr_completions() {
 
     case "$prev" in
         -t|--timeout)
-            COMPREPLY=( $(compgen -W "10 30 60 120" -- "$cur") )
+            mapfile -t COMPREPLY < <(compgen -W "10 30 60 120" -- "$cur")
             return 0
             ;;
     esac
 
     if [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+        mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
         return 0
     fi
 }
 
 complete -F _adbqr_completions adbqr
+
