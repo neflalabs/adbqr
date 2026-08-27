@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check Bash Syntax
+        run: |
+          make check
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -S warning bin/adbqr install.sh uninstall.sh completions/adbqr.bash

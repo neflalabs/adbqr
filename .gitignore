@@ -1,0 +1,10 @@
+# Scratch & temporary
+scratch/
+*.tmp
+*.log
+
+# Editor & OS files
+.DS_Store
+.idea/
+.vscode/
+*~

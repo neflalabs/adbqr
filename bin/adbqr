@@ -1,0 +1,941 @@
+#!/usr/bin/env bash
+#
+# adbqr - Android Wireless Debugging Wizard & QR Pairer for Linux
+# Highly optimized for Fedora, Ubuntu, Arch, and Android 11-16.
+#
+# Features:
+# - Active Wi-Fi SSID detection & display (nmcli / iw)
+# - Sub-100ms event-driven mDNS discovery via Avahi streaming
+# - Automatic device model & Android 16 detection from mDNS TXT records
+# - Auto-connect immediately following pairing
+# - Optional scrcpy screen mirroring integration (--screen / -s)
+# - Desktop notifications via notify-send
+# - Smart device history cache in ~/.config/adbqr/
+# - 1-Click USB-to-Wireless switch (adb tcpip 5555)
+# - Wayland/X11 clipboard integration (wl-copy / xclip)
+# - Clean Ctrl+C / SIGINT signal cancellation
+# - Smooth terminal spinner and graphics protocol support (Kitty, iTerm2, ANSI)
+
+set -euo pipefail
+
+# Ensure running on Linux
+if [ "$(uname)" != "Linux" ]; then
+    echo "Error: adbqr is designed specifically for Linux." >&2
+    exit 1
+fi
+
+TIMEOUT=60
+LAUNCH_SCRCPY=false
+NAME=""
+CODE=""
+PAYLOAD=""
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/adbqr"
+HISTORY_FILE="$CONFIG_DIR/devices.tsv"
+
+# Colors and styling
+BOLD='\033[1m'
+DIM='\033[2m'
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+CYAN='\033[36m'
+MAGENTA='\033[35m'
+RESET='\033[0m'
+
+# Initialize config directory
+mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+
+# Global signal handler for clean Ctrl+C cancellation
+on_interrupt() {
+    printf '\033[?25h\n' 2>/dev/null || true
+    # Kill any active child/background processes
+    jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
+    pkill -P $$ 2>/dev/null || true
+    echo -e "\n${YELLOW}[!] Dibatalkan (Ctrl+C).${RESET}"
+    exit 130
+}
+trap on_interrupt INT TERM
+
+die() {
+    printf '\033[?25h' 2>/dev/null || true
+    echo -e "\n${RED}${BOLD}[!] Error:${RESET} $*" >&2
+    exit 1
+}
+
+warn() {
+    echo -e "${YELLOW}${BOLD}[!] Perhatian:${RESET} $*" >&2
+}
+
+info() {
+    echo -e "${BLUE}${BOLD}[i]${RESET} $*"
+}
+
+success() {
+    echo -e "${GREEN}${BOLD}[✓]${RESET} $*"
+}
+
+notify_desktop() {
+    local title="$1"
+    local msg="$2"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a "adbqr" -i "phone" "$title" "$msg" 2>/dev/null || true
+    fi
+}
+
+# The platform's usual package manager on Linux
+pkg_manager() {
+    local m
+    for m in dnf apt pacman zypper apk; do
+        if command -v "$m" >/dev/null 2>&1; then echo "$m"; return; fi
+    done
+}
+
+install_hint() {
+    local mgr
+    mgr=$(pkg_manager)
+    case "$1:$mgr" in
+        adb:apt)                                   echo "sudo apt install adb" ;;
+        adb:dnf|adb:zypper)                        echo "sudo $mgr install android-tools" ;;
+        adb:pacman)                                echo "sudo pacman -S android-tools" ;;
+        adb:apk)                                   echo "sudo apk add android-tools" ;;
+        adb:*)                                     echo "Install Android platform-tools / adb." ;;
+        qrencode:apt|qrencode:dnf|qrencode:zypper) echo "sudo $mgr install qrencode" ;;
+        qrencode:pacman)                           echo "sudo pacman -S qrencode" ;;
+        qrencode:apk)                              echo "sudo apk add libqrencode-tools" ;;
+        qrencode:*)                                echo "Install qrencode." ;;
+        avahi-browse:dnf|avahi-browse:zypper)      echo "sudo $mgr install avahi-tools" ;;
+        avahi-browse:apt)                          echo "sudo apt install avahi-utils" ;;
+        avahi-browse:pacman)                       echo "sudo pacman -S avahi" ;;
+        avahi-browse:apk)                          echo "sudo apk add avahi" ;;
+        avahi-browse:*)                            echo "Install avahi-tools / avahi-utils." ;;
+        scrcpy:dnf|scrcpy:zypper)                  echo "sudo $mgr install scrcpy" ;;
+        scrcpy:apt)                                echo "sudo apt install scrcpy" ;;
+        scrcpy:pacman)                             echo "sudo pacman -S scrcpy" ;;
+        scrcpy:*)                                  echo "Install scrcpy." ;;
+    esac
+}
+
+require() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        local hint
+        hint=$(install_hint "$1")
+        die "'$1' tidak ditemukan. Jalankan: ${BOLD}${hint}${RESET}"
+    fi
+}
+
+check_dependencies() {
+    require adb
+    require qrencode
+
+    if ! adb mdns check >/dev/null 2>&1 && ! command -v avahi-browse >/dev/null 2>&1; then
+        warn "Distro ADB kamu tidak memiliki built-in mDNS dan 'avahi-browse' belum terinstall."
+        local hint
+        hint=$(install_hint "avahi-browse")
+        echo -e "    Disarankan install avahi: ${BOLD}${hint}${RESET}\n"
+    fi
+}
+
+# Detect connected Wi-Fi SSID
+get_wifi_ssid() {
+    local ssid=""
+    # 1. Try nmcli (NetworkManager standard on Fedora/Ubuntu/Arch)
+    if command -v nmcli >/dev/null 2>&1; then
+        ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}' || true)
+    fi
+
+    # 2. Try iw fallback
+    if [ -z "$ssid" ] && command -v iw >/dev/null 2>&1; then
+        local iface
+        iface=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+        if [ -n "$iface" ]; then
+            ssid=$(iw dev "$iface" link 2>/dev/null | awk -F': ' '/SSID:/{print $2; exit}' || true)
+        fi
+    fi
+
+    echo "$ssid"
+}
+
+# Copy text to clipboard if wl-copy or xclip is available
+copy_to_clipboard() {
+    local text="$1"
+    if command -v wl-copy >/dev/null 2>&1 && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        echo -n "$text" | wl-copy 2>/dev/null || true
+        echo -e "  ${DIM}📋 Disalin ke clipboard: ${CYAN}$text${RESET}"
+    elif command -v xclip >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+        echo -n "$text" | xclip -selection clipboard 2>/dev/null || true
+        echo -e "  ${DIM}📋 Disalin ke clipboard: ${CYAN}$text${RESET}"
+    fi
+}
+
+# Launch scrcpy if requested
+maybe_launch_scrcpy() {
+    local serial="$1"
+    if [ "$LAUNCH_SCRCPY" = true ]; then
+        if command -v scrcpy >/dev/null 2>&1; then
+            echo ""
+            info "Membuka screen mirroring (${BOLD}scrcpy -s $serial${RESET})..."
+            scrcpy -s "$serial" >/dev/null 2>&1 &
+        else
+            warn "scrcpy belum terinstall. Jalankan: ${BOLD}$(install_hint scrcpy)${RESET}"
+        fi
+    fi
+}
+
+# Convert Android API Level (e.g. 36.0) to friendly Android Version
+api_to_version() {
+    local raw="${1:-}"
+    local api="${raw%%.*}"
+    case "$api" in
+        36) echo "Android 16" ;;
+        35) echo "Android 15" ;;
+        34) echo "Android 14" ;;
+        33) echo "Android 13" ;;
+        31|32) echo "Android 12" ;;
+        30) echo "Android 11" ;;
+        *)  [ -n "$api" ] && echo "Android API $api" || echo "Android" ;;
+    esac
+}
+
+# Parse TXT records from mDNS (name and api)
+parse_txt_record() {
+    local txt="$1"
+    local model="" api=""
+    if [[ "$txt" =~ name=\"?([^\"[:space:]]+) ]]; then
+        model="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$txt" =~ api=\"?([^\"[:space:]]+) ]]; then
+        api="${BASH_REMATCH[1]}"
+    fi
+    echo "$model|$api"
+}
+
+# Save device to history
+save_device_history() {
+    local ip="$1"
+    local port="$2"
+    local model="${3:-Unknown}"
+    local os_ver="${4:-Android}"
+    local s_name="${5:-}"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    local tmp_hist
+    tmp_hist=$(mktemp "${TMPDIR:-/tmp}/adbqr-hist.XXXXXX")
+    if [ -f "$HISTORY_FILE" ]; then
+        # Remove existing entry for same IP to avoid duplicates
+        grep -v "$ip" "$HISTORY_FILE" > "$tmp_hist" 2>/dev/null || true
+    fi
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$timestamp" "$ip" "$port" "$model" "$os_ver" "$s_name" >> "$tmp_hist"
+    mv "$tmp_hist" "$HISTORY_FILE"
+}
+
+# Best-effort IPv4 prefix length on Linux
+wifi_prefixlen() {
+    local iface
+    iface=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+    [ -n "$iface" ] || return 0
+    ip -o -f inet addr show dev "$iface" 2>/dev/null \
+        | awk '{print $4}' | awk -F/ 'NF>1 {print $2; exit}'
+}
+
+network_warning() {
+    local plen
+    plen=$(wifi_prefixlen)
+    [ -n "$plen" ] || return 0
+    if [ "$plen" -le 22 ]; then
+        warn "Jaringan ini terdeteksi sebagai subnet publik/besar (/$plen)."
+        echo -e "    Wi-Fi publik sering mengaktifkan ${BOLD}AP Isolation${RESET} yang memblokir mDNS."
+        echo -e "    Jika pairing tidak terdeteksi, gunakan Hotspot HP / Wi-Fi lokal.\n"
+    fi
+}
+
+# Render QR using Kitty graphics protocol
+render_inline_kitty() {
+    local b64 pos len chunk m first
+    b64=$(qrencode -m 2 -s 8 -o - -t PNG "$PAYLOAD" 2>/dev/null | base64 | tr -d '\n') || return 1
+    pos=0; len=${#b64}; first=1
+    while [ "$pos" -lt "$len" ]; do
+        chunk=${b64:pos:4096}
+        pos=$((pos + 4096))
+        m=1; if [ "$pos" -ge "$len" ]; then m=0; fi
+        if [ "$first" -eq 1 ]; then
+            printf '\033_Gf=100,a=T,m=%d;%s\033\\' "$m" "$chunk"
+            first=0
+        else
+            printf '\033_Gm=%d;%s\033\\' "$m" "$chunk"
+        fi
+    done
+    printf '\n'
+}
+
+# Render QR using iTerm2 protocol
+render_inline_iterm2() {
+    local b64
+    b64=$(qrencode -m 2 -s 8 -o - -t PNG "$PAYLOAD" 2>/dev/null | base64 | tr -d '\n') || return 1
+    printf '\033]1337;File=inline=1;preserveAspectRatio=1:%s\a\n' "$b64"
+}
+
+term_query() {
+    [ -t 1 ] && [ -r /dev/tty ] || return 1
+    local old resp
+    old=$(stty -g </dev/tty 2>/dev/null) || return 1
+    stty -echo -icanon </dev/tty 2>/dev/null || { stty "$old" </dev/tty 2>/dev/null; return 1; }
+    printf '%s\033[c' "$1" >/dev/tty
+    IFS= read -rs -t 1 -d c resp </dev/tty || true
+    stty "$old" </dev/tty 2>/dev/null
+    printf '%s' "$resp"
+}
+
+supports_kitty_graphics() {
+    local r
+    r=$(term_query $'\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\') || return 1
+    [[ "$r" == *"_Gi=31;OK"* ]]
+}
+
+supports_iterm2_image() {
+    local r
+    r=$(term_query $'\033[>q') || return 1
+    [[ "$r" == *"iTerm2"* || "$r" == *"WezTerm"* ]]
+}
+
+render_qr() {
+    if supports_kitty_graphics && render_inline_kitty; then return 0; fi
+    if supports_iterm2_image && render_inline_iterm2; then return 0; fi
+    qrencode -m 2 -t ANSIUTF8 "$PAYLOAD"
+}
+
+# Real-time event-driven mDNS discovery with sub-100ms latency and spinner UI
+# Output variables: TARGET_ADDR, TARGET_MODEL, TARGET_ANDROID
+stream_discover_mdns() {
+    local service_type="$1"
+    local target_name="${2:-}"
+    local target_ip="${3:-}"
+    local timeout_sec="${4:-60}"
+    local prompt_msg="${5:-Menunggu deteksi perangkat...}"
+
+    TARGET_ADDR=""
+    TARGET_MODEL=""
+    TARGET_ANDROID=""
+
+    local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local spin_idx=0
+    local start_time
+    start_time=$(date +%s)
+
+    # 1. Event streaming using Avahi (Linux/Fedora)
+    if command -v avahi-browse >/dev/null 2>&1; then
+        local fifo="" browse_pid=""
+        fifo=$(mktemp -u "${TMPDIR:-/tmp}/adbqr-fifo.XXXXXX")
+        mkfifo "$fifo"
+        exec 3<>"$fifo"
+
+        avahi-browse -r -p "$service_type" >&3 2>/dev/null &
+        browse_pid=$!
+
+        printf '\033[?25l' # Hide cursor
+
+        cleanup_browse() {
+            [ -n "$browse_pid" ] && kill "$browse_pid" 2>/dev/null || true
+            [ -n "$browse_pid" ] && wait "$browse_pid" 2>/dev/null || true
+            exec 3>&- 2>/dev/null || true
+            [ -n "$fifo" ] && rm -f "$fifo" 2>/dev/null || true
+            printf '\033[?25h' 2>/dev/null || true
+        }
+
+        while true; do
+            local now
+            now=$(date +%s)
+            local elapsed=$((now - start_time))
+            if [ "$elapsed" -ge "$timeout_sec" ]; then
+                break
+            fi
+
+            # Non-blocking read with 0.1s timeout
+            if read -r -t 0.1 -u 3 line; then
+                if [[ "$line" == "=;"* ]]; then
+                    local status iface proto name type domain host ip port txt
+                    IFS=';' read -r status iface proto name type domain host ip port txt <<< "$line"
+                    if [ "$proto" = "IPv4" ] && [ -n "$ip" ] && [ -n "$port" ]; then
+                        if [ -n "$target_name" ] && [ "$name" != "$target_name" ]; then
+                            continue
+                        fi
+                        if [ -n "$target_ip" ] && [ "$ip" != "$target_ip" ]; then
+                            continue
+                        fi
+
+                        TARGET_ADDR="$ip:$port"
+                        local parsed
+                        parsed=$(parse_txt_record "$txt")
+                        TARGET_MODEL="${parsed%%|*}"
+                        local raw_api="${parsed##*|}"
+                        TARGET_ANDROID=$(api_to_version "$raw_api")
+                        break
+                    fi
+                fi
+            fi
+
+            local char="${spin_chars[$spin_idx]}"
+            spin_idx=$(( (spin_idx + 1) % ${#spin_chars[@]} ))
+            local remaining=$((timeout_sec - elapsed))
+            printf "\r  ${CYAN}%s${RESET} %s ${DIM}(%ds)${RESET}  " "$char" "$prompt_msg" "$remaining"
+        done
+
+        cleanup_browse
+        printf "\r\033[K" # Clear spinner line
+
+        [ -n "$TARGET_ADDR" ] && return 0
+    fi
+
+    # 2. Fallback to native adb mdns polling
+    if adb mdns check >/dev/null 2>&1; then
+        for _ in $(seq 1 "$timeout_sec"); do
+            local res
+            res=$(adb mdns services 2>/dev/null | awk -v svc="$service_type" -v name="$target_name" '
+                $0 ~ svc {
+                    if (name == "" || index($1, name) > 0 || index($2, name) > 0) {
+                        print $3;
+                        exit;
+                    }
+                }
+            ')
+            if [ -n "$res" ]; then
+                TARGET_ADDR="$res"
+                return 0
+            fi
+            sleep 1
+        done
+    fi
+
+    return 1
+}
+
+# Auto-connect pipeline following pairing
+auto_connect_device() {
+    local target_ip="$1"
+    local model="${2:-}"
+    local os_ver="${3:-}"
+    local connect_addr=""
+
+    echo ""
+    info "Mencari port koneksi debugging (${CYAN}_adb-tls-connect._tcp${RESET})..."
+
+    if stream_discover_mdns "_adb-tls-connect._tcp" "" "$target_ip" 10 "Menghubungkan otomatis..."; then
+        connect_addr="$TARGET_ADDR"
+        [ -n "$TARGET_MODEL" ] && model="$TARGET_MODEL"
+        [ -n "$TARGET_ANDROID" ] && os_ver="$TARGET_ANDROID"
+    fi
+
+    if [ -n "$connect_addr" ]; then
+        info "Menghubungkan ke ${BOLD}$connect_addr${RESET}..."
+        if adb connect "$connect_addr"; then
+            echo ""
+            success "Berhasil terhubung ke Android!"
+            if [ -n "$model" ] || [ -n "$os_ver" ]; then
+                echo -e "  📱 ${BOLD}Perangkat:${RESET} ${GREEN}${model:-Android Device}${RESET} (${CYAN}${os_ver:-Android}${RESET})"
+            fi
+            save_device_history "$target_ip" "${connect_addr##*:}" "$model" "$os_ver" ""
+            copy_to_clipboard "adb connect $connect_addr"
+            notify_desktop "Android Terhubung!" "${model:-Perangkat} ($os_ver) @ $connect_addr"
+            echo ""
+            adb devices -l
+            maybe_launch_scrcpy "$connect_addr"
+            return 0
+        fi
+    fi
+
+    # Fallback to manual port prompt if mDNS connect didn't arrive
+    warn "Port koneksi otomatis belum terdeteksi via mDNS."
+    echo -e "    Lihat di layar HP: ${BOLD}Wireless debugging${RESET} > ${BOLD}IP address & Port${RESET}"
+    echo -ne "    Masukkan Port (atau Enter untuk lewati) [contoh: 38475]: "
+    local manual_port
+    read -r manual_port || true
+    if [ -n "$manual_port" ]; then
+        local full_addr="$target_ip:$manual_port"
+        [[ "$manual_port" == *":"* ]] && full_addr="$manual_port"
+        info "Menghubungkan ke $full_addr ..."
+        if adb connect "$full_addr"; then
+            save_device_history "$target_ip" "$manual_port" "$model" "$os_ver" ""
+            copy_to_clipboard "adb connect $full_addr"
+            notify_desktop "Android Terhubung!" "${model:-Perangkat} @ $full_addr"
+            echo ""
+            adb devices -l
+            maybe_launch_scrcpy "$full_addr"
+        fi
+    fi
+}
+
+# Mode 1: QR Code Pairing Flow
+flow_qr_pairing() {
+    check_dependencies
+
+    local current_ssid
+    current_ssid=$(get_wifi_ssid)
+
+    NAME="adbqr-$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+    CODE=$(( (RANDOM * 32768 + RANDOM) % 900000 + 100000 ))
+    PAYLOAD="WIFI:T:ADB;S:$NAME;P:$CODE;;"
+
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}             ANDROID WIRELESS DEBUGGING (QR PAIRING)              ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    if [ -n "$current_ssid" ]; then
+        echo -e "  📶 ${BOLD}Wi-Fi Aktif:${RESET} ${GREEN}${BOLD}$current_ssid${RESET}  ${DIM}(Pastikan HP terhubung ke Wi-Fi ini)${RESET}"
+    fi
+    echo ""
+    echo -e " ${BOLD}Langkah di HP Android (Android 11 - 16):${RESET}"
+    echo -e "  1. Buka ${BOLD}Settings${RESET} > ${BOLD}System${RESET} > ${BOLD}Developer options${RESET}"
+    echo -e "  2. Aktifkan toggle ${BOLD}Wireless debugging${RESET}"
+    echo -e "  3. Ketuk ${BOLD}Wireless debugging${RESET} > pilih ${BOLD}Pair device with QR code${RESET}"
+    echo -e "  4. Arahkan kamera HP ke QR Code berikut:"
+    echo ""
+
+    render_qr
+
+    echo ""
+    echo -e "  ${DIM}Service Name:${RESET} ${CYAN}$NAME${RESET}    ${DIM}Pairing Code:${RESET} ${YELLOW}${BOLD}$CODE${RESET}"
+    echo ""
+    network_warning
+
+    if ! stream_discover_mdns "_adb-tls-pairing._tcp" "$NAME" "" "$TIMEOUT" "Menunggu scan QR dari HP..."; then
+        # Try generic pairing if specific service name timed out
+        stream_discover_mdns "_adb-tls-pairing._tcp" "" "" 5 "Mengecek discovery alternatif..." || true
+    fi
+
+    [ -n "$TARGET_ADDR" ] || die "Tidak ada perangkat yang terdeteksi dalam ${TIMEOUT} detik."
+
+    local phone_ip="${TARGET_ADDR%%:*}"
+    local phone_model="$TARGET_MODEL"
+    local phone_os="$TARGET_ANDROID"
+
+    echo ""
+    success "Perangkat terdeteksi di ${BOLD}$TARGET_ADDR${RESET}!"
+    if [ -n "$phone_model" ] || [ -n "$phone_os" ]; then
+        echo -e "  📱 ${BOLD}Info:${RESET} ${GREEN}${phone_model:-Device}${RESET} (${CYAN}${phone_os:-Android}${RESET})"
+    fi
+
+    info "Melakukan pairing dengan kode: ${YELLOW}${BOLD}$CODE${RESET}..."
+    if adb pair "$TARGET_ADDR" "$CODE"; then
+        echo ""
+        success "Pairing berhasil!"
+        auto_connect_device "$phone_ip" "$phone_model" "$phone_os"
+    else
+        die "Gagal melakukan pairing ke $TARGET_ADDR."
+    fi
+}
+
+# Mode 2: Quick Connect (Discovered & Known Devices)
+flow_quick_connect() {
+    check_dependencies
+    local current_ssid
+    current_ssid=$(get_wifi_ssid)
+
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}               QUICK CONNECT (ACTIVE WI-FI DEVICES)               ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    if [ -n "$current_ssid" ]; then
+        echo -e "  📶 ${BOLD}Wi-Fi:${RESET} ${GREEN}${BOLD}$current_ssid${RESET}"
+    fi
+    echo ""
+    info "Memindai perangkat Android aktif di jaringan Wi-Fi..."
+
+    local devices=()
+    local addrs=()
+    local models=()
+
+    if command -v avahi-browse >/dev/null 2>&1; then
+        while IFS=';' read -r status iface proto name type domain host ip port txt; do
+            if [ "$status" = "=" ] && [ "$proto" = "IPv4" ] && [ -n "$ip" ] && [ -n "$port" ]; then
+                local parsed
+                parsed=$(parse_txt_record "$txt")
+                local m="${parsed%%|*}"
+                local a
+                a=$(api_to_version "${parsed##*|}")
+                local label="${m:-Device} ($a) @ $ip:$port"
+                devices+=("$label")
+                addrs+=("$ip:$port")
+                models+=("${m:-Unknown}")
+            fi
+        done < <(avahi-browse -r -p -t "_adb-tls-connect._tcp" 2>/dev/null || true)
+    fi
+
+    if [ ${#devices[@]} -eq 0 ]; then
+        warn "Tidak ditemukan broadcast _adb-tls-connect._tcp otomatis."
+        
+        # Show recent devices from history if available
+        if [ -f "$HISTORY_FILE" ] && [ -s "$HISTORY_FILE" ]; then
+            echo -e "\n${BOLD}Riwayat Perangkat Terakhir:${RESET}"
+            awk -F'\t' '{printf "   - %s (%s) IP Terakhir: %s\n", $4, $5, $2}' "$HISTORY_FILE"
+            echo ""
+        fi
+
+        echo -ne "Masukkan IP:Port HP secara manual (contoh: 192.168.1.50:39845): "
+        local manual_addr
+        read -r manual_addr || true
+        if [ -n "$manual_addr" ]; then
+            info "Menghubungkan ke $manual_addr ..."
+            if adb connect "$manual_addr"; then
+                copy_to_clipboard "adb connect $manual_addr"
+                notify_desktop "Android Terhubung!" "Alamat: $manual_addr"
+                maybe_launch_scrcpy "$manual_addr"
+            fi
+            echo ""
+            adb devices -l
+        fi
+        return 0
+    fi
+
+    echo -e "\n${BOLD}Perangkat aktif ditemukan:${RESET}"
+    local idx=1
+    for dev in "${devices[@]}"; do
+        echo -e "  ${BOLD}[$idx]${RESET} ${GREEN}$dev${RESET}"
+        idx=$((idx + 1))
+    done
+
+    echo ""
+    echo -ne "Pilih nomor [1-${#devices[@]}] atau Enter untuk connect semua: "
+    local choice
+    read -r choice || true
+
+    local connected_target=""
+    if [ -z "$choice" ]; then
+        for i in "${!addrs[@]}"; do
+            local addr="${addrs[$i]}"
+            info "Connecting $addr ..."
+            if adb connect "$addr"; then
+                save_device_history "${addr%%:*}" "${addr##*:}" "${models[$i]}" "" ""
+                copy_to_clipboard "adb connect $addr"
+                connected_target="$addr"
+            fi
+        done
+    else
+        local sel=$((choice - 1))
+        if [ "$sel" -ge 0 ] && [ "$sel" -lt "${#addrs[@]}" ]; then
+            local addr="${addrs[$sel]}"
+            info "Connecting $addr ..."
+            if adb connect "$addr"; then
+                save_device_history "${addr%%:*}" "${addr##*:}" "${models[$sel]}" "" ""
+                copy_to_clipboard "adb connect $addr"
+                connected_target="$addr"
+            fi
+        else
+            warn "Pilihan tidak valid."
+        fi
+    fi
+
+    if [ -n "$connected_target" ]; then
+        notify_desktop "Android Terhubung!" "Alamat: $connected_target"
+        echo ""
+        adb devices -l
+        maybe_launch_scrcpy "$connected_target"
+    fi
+}
+
+# Mode 3: 1-Click USB to Wireless Switch (adb tcpip 5555)
+flow_usb_to_wireless() {
+    check_dependencies
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}              1-CLICK SWITCH: USB TO WIRELESS ADB                 ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    info "Memeriksa perangkat Android yang tersambung via kabel USB..."
+    local usb_devices
+    usb_devices=$(adb devices -l | awk 'NR>1 && $2=="device" && $1 !~ /:[0-9]+$/ {print $1}')
+
+    if [ -z "$usb_devices" ]; then
+        warn "Tidak ada perangkat USB terdeteksi."
+        echo -e "    Pastikan kabel USB terpasang dan USB Debugging aktif di HP."
+        return 1
+    fi
+
+    for serial in $usb_devices; do
+        local model
+        model=$(adb -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r\n' || echo "$serial")
+        local os_ver
+        os_ver=$(adb -s "$serial" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r\n' || echo "")
+        
+        info "Ditemukan perangkat USB: ${BOLD}$model${RESET} (Android $os_ver) [Serial: $serial]"
+        
+        # Get Phone Wi-Fi IP
+        local phone_ip
+        phone_ip=$(adb -s "$serial" shell ip route 2>/dev/null | awk '/src/ {print $NF; exit}' | tr -d '\r\n')
+        if [ -z "$phone_ip" ]; then
+            phone_ip=$(adb -s "$serial" shell ip -f inet addr show wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | tr -d '\r\n')
+        fi
+
+        if [ -z "$phone_ip" ]; then
+            warn "Gagal mendapatkan IP Wi-Fi otomatis dari HP."
+            echo -ne "Masukkan IP Wi-Fi HP secara manual: "
+            read -r phone_ip
+        fi
+
+        [ -n "$phone_ip" ] || continue
+
+        info "Mengaktifkan port TCP/IP 5555 pada perangkat..."
+        adb -s "$serial" tcpip 5555
+        sleep 1
+
+        info "Menghubungkan via Wi-Fi ke $phone_ip:5555 ..."
+        if adb connect "$phone_ip:5555"; then
+            echo ""
+            success "Berhasil beralih ke mode Wireless ADB!"
+            echo -e "  🎉 ${BOLD}Anda sekarang dapat mencabut kabel USB!${RESET}"
+            save_device_history "$phone_ip" "5555" "$model" "Android $os_ver" ""
+            copy_to_clipboard "adb connect $phone_ip:5555"
+            notify_desktop "Wireless ADB Aktif!" "$model terhubung ke $phone_ip:5555"
+            echo ""
+            adb devices -l
+            maybe_launch_scrcpy "$phone_ip:5555"
+        else
+            die "Gagal menghubungkan ke $phone_ip:5555."
+        fi
+    done
+}
+
+# Mode 4: Manual Pairing
+flow_manual_pair() {
+    check_dependencies
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}                 MANUAL PAIRING (PAIRING CODE)                    ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+    echo -e " ${BOLD}Langkah di HP Android:${RESET}"
+    echo -e "  1. Buka ${BOLD}Wireless debugging${RESET}"
+    echo -e "  2. Pilih ${BOLD}'Pair device with pairing code'${RESET} (bukan QR)"
+    echo -e "  3. HP akan menampilkan IP address, Port pairing, dan 6 digit Wi-Fi pairing code."
+    echo ""
+
+    echo -ne " Masukkan IP address & Port pairing (contoh: 192.168.1.50:41235): "
+    local pair_addr
+    read -r pair_addr
+    [ -n "$pair_addr" ] || die "Alamat tidak boleh kosong."
+
+    echo -ne " Masukkan 6-digit Wi-Fi pairing code: "
+    local pair_code
+    read -r pair_code
+    [ -n "$pair_code" ] || die "Kode pairing tidak boleh kosong."
+
+    info "Memasangkan dengan $pair_addr ..."
+    if adb pair "$pair_addr" "$pair_code"; then
+        success "Pairing berhasil!"
+        local phone_ip="${pair_addr%%:*}"
+        auto_connect_device "$phone_ip"
+    else
+        die "Pairing gagal."
+    fi
+}
+
+# Mode 5: View History
+flow_history() {
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}                    RIWAYAT PERANGKAT TERDAFTAR                   ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+    if [ ! -f "$HISTORY_FILE" ] || [ ! -s "$HISTORY_FILE" ]; then
+        info "Belum ada riwayat perangkat tersimpan."
+        return 0
+    fi
+
+    printf "  %-20s %-16s %-8s %-20s %-14s\n" "TERAKHIR KONEK" "IP ADDRESS" "PORT" "MODEL" "OS"
+    printf "  %-20s %-16s %-8s %-20s %-14s\n" "-------------------" "---------------" "------" "-------------------" "-------------"
+    while IFS=$'\t' read -r t ip port model os s_name; do
+        printf "  %-20s %-16s %-8s %-20s %-14s\n" "$t" "$ip" "$port" "$model" "$os"
+    done < "$HISTORY_FILE"
+    echo ""
+}
+
+# Mode 6: Diagnostics & Fedora health check
+flow_diagnostics() {
+    local current_ssid
+    current_ssid=$(get_wifi_ssid)
+
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}                 FEDORA / LINUX SYSTEM DIAGNOSTICS                ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    echo -e "${BOLD}1. Tool Checks:${RESET}"
+    for tool in adb qrencode avahi-browse firewall-cmd ip nmcli wl-copy scrcpy notify-send; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo -e "   [✓] $tool: ${GREEN}$(command -v "$tool")${RESET}"
+        else
+            echo -e "   [✗] $tool: ${RED}Not installed${RESET} ($(install_hint "$tool"))"
+        fi
+    done
+
+    echo ""
+    echo -e "${BOLD}2. ADB Capabilities:${RESET}"
+    echo -e "   ADB Version: $(adb version 2>&1 | head -n 2 | tr '\n' ' ')"
+    if adb mdns check >/dev/null 2>&1; then
+        echo -e "   ADB mDNS Support: ${GREEN}Enabled (Built-in)${RESET}"
+    else
+        echo -e "   ADB mDNS Support: ${YELLOW}Disabled in distro package (Avahi streaming active)${RESET}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}3. Avahi Daemon (mDNS / Zeroconf):${RESET}"
+    if systemctl is-active avahi-daemon >/dev/null 2>&1; then
+        echo -e "   avahi-daemon status: ${GREEN}Active & Running${RESET}"
+    else
+        echo -e "   avahi-daemon status: ${RED}Inactive / Not running${RESET}"
+        echo -e "   Jalankan: ${BOLD}sudo systemctl enable --now avahi-daemon${RESET}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}4. Firewall Status (firewalld):${RESET}"
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+        local zone
+        zone=$(firewall-cmd --get-default-zone 2>/dev/null || echo "default")
+        echo -e "   firewalld default zone: ${CYAN}$zone${RESET}"
+        if firewall-cmd --list-services 2>/dev/null | grep -qw mdns; then
+            echo -e "   mDNS service (5353/udp): ${GREEN}Allowed in firewall${RESET}"
+        else
+            echo -e "   mDNS service (5353/udp): ${YELLOW}Not explicitly listed in active zone${RESET}"
+            echo -e "   Jika scan mDNS gagal, jalankan:"
+            echo -e "   ${BOLD}sudo firewall-cmd --add-service=mdns --permanent && sudo firewall-cmd --reload${RESET}"
+        fi
+    else
+        echo -e "   firewalld: Not active or not installed."
+    fi
+
+    echo ""
+    echo -e "${BOLD}5. Wi-Fi & Active Network Interfaces:${RESET}"
+    if [ -n "$current_ssid" ]; then
+        echo -e "   Connected Wi-Fi SSID: ${GREEN}${BOLD}$current_ssid${RESET}"
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        ip -o -f inet addr show | awk '{printf "   Interface: %-12s IP: %s\n", $2, $4}'
+    fi
+
+    echo ""
+    echo -e "${BOLD}6. Currently Connected ADB Devices:${RESET}"
+    adb devices -l
+    echo ""
+}
+
+# Mode 7: Reset ADB Server
+flow_reset_adb() {
+    info "Memutus semua koneksi dan merestart ADB server..."
+    adb disconnect 2>/dev/null || true
+    adb kill-server 2>/dev/null || true
+    adb start-server
+    success "ADB server berhasil di-restart."
+    echo ""
+    adb devices -l
+}
+
+# Interactive Wizard Menu
+flow_wizard_menu() {
+    while true; do
+        local current_ssid
+        current_ssid=$(get_wifi_ssid)
+
+        echo -e "\n${CYAN}${BOLD}==================================================================${RESET}"
+        echo -e "${GREEN}${BOLD}        ADB WIRELESS DEBUGGING WIZARD (FEDORA / ANDROID 16)       ${RESET}"
+        echo -e "${CYAN}${BOLD}==================================================================${RESET}"
+        if [ -n "$current_ssid" ]; then
+            echo -e "  📶 ${BOLD}Wi-Fi:${RESET} ${GREEN}${BOLD}$current_ssid${RESET}"
+            echo -e "${CYAN}------------------------------------------------------------------${RESET}"
+        fi
+        echo -e "  ${BOLD}[1]${RESET} Scan QR Code (Pairing & Auto-Connect baru)"
+        echo -e "  ${BOLD}[2]${RESET} Quick Connect (Hubungkan ke HP di jaringan Wi-Fi)"
+        echo -e "  ${BOLD}[3]${RESET} 1-Click USB to Wireless (Alihkan USB ke Wi-Fi port 5555)"
+        echo -e "  ${BOLD}[4]${RESET} Mirror Layar dengan scrcpy"
+        echo -e "  ${BOLD}[5]${RESET} Manual Pairing (Menggunakan 6-digit Code & IP:Port)"
+        echo -e "  ${BOLD}[6]${RESET} Riwayat Perangkat (History)"
+        echo -e "  ${BOLD}[7]${RESET} System Diagnostics (Cek Avahi, Firewall, & Paket Fedora)"
+        echo -e "  ${BOLD}[8]${RESET} Reset / Restart ADB Server"
+        echo -e "  ${BOLD}[0]${RESET} Keluar"
+        echo -e "${CYAN}------------------------------------------------------------------${RESET}"
+        echo -ne "Pilih menu [1-8, 0]: "
+        local opt
+        read -r opt || true
+        echo ""
+
+        case "$opt" in
+            1) flow_qr_pairing; break ;;
+            2) flow_quick_connect; break ;;
+            3) flow_usb_to_wireless; break ;;
+            4) 
+               LAUNCH_SCRCPY=true
+               flow_quick_connect
+               break 
+               ;;
+            5) flow_manual_pair; break ;;
+            6) flow_history ;;
+            7) flow_diagnostics ;;
+            8) flow_reset_adb ;;
+            0|q|Q) echo "Sampai jumpa!"; exit 0 ;;
+            *) warn "Pilihan tidak valid, silakan coba lagi." ;;
+        esac
+    done
+}
+
+usage() {
+    cat <<'EOF'
+Usage: adbqr [OPTIONS]
+
+Android Wireless Debugging tool & wizard for pairing Fedora/Linux to Android 11-16.
+
+Options:
+  -w, --wizard        Launch the interactive wizard menu.
+  -p, --pair          Pair a new device using QR code (default action).
+  -c, --connect       Quick-connect to an active wireless device via mDNS.
+  -s, --screen        Auto-launch scrcpy mirror screen after connecting.
+  -u, --usb           Switch a connected USB device to Wireless ADB (port 5555).
+  -m, --manual        Pair manually using 6-digit pairing code and IP:Port.
+  -l, --list          List known device history.
+  -d, --diag          Run Fedora/system diagnostics (Avahi, firewall, ADB).
+  -r, --reset         Restart ADB server and disconnect wireless devices.
+  -t, --timeout SEC   Set mDNS discovery timeout in seconds (default: 60).
+  -h, --help          Show this help message.
+
+Examples:
+  adbqr               # Quick QR pairing & auto-connect (default)
+  adbqr -s            # Pair/connect and immediately launch scrcpy
+  adbqr --wizard      # Full interactive wizard menu
+  adbqr --connect     # Auto-connect to existing wireless device
+  adbqr --usb         # Convert USB device to wireless mode
+  adbqr --diag        # Check firewall and mDNS status
+EOF
+}
+
+main() {
+    local action="pair"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -w|--wizard)  action="wizard" ;;
+            -p|--pair)    action="pair" ;;
+            -c|--connect) action="connect" ;;
+            -s|--screen)  LAUNCH_SCRCPY=true ;;
+            -u|--usb)     action="usb" ;;
+            -m|--manual)  action="manual" ;;
+            -l|--list)    action="list" ;;
+            -d|--diag)    action="diag" ;;
+            -r|--reset)   action="reset" ;;
+            -t|--timeout) shift; TIMEOUT="${1:-60}" ;;
+            -h|--help)    usage; return 0 ;;
+            *) usage >&2; return 2 ;;
+        esac
+        shift
+    done
+
+    case "$action" in
+        wizard)  flow_wizard_menu ;;
+        pair)    flow_qr_pairing ;;
+        connect) flow_quick_connect ;;
+        usb)     flow_usb_to_wireless ;;
+        manual)  flow_manual_pair ;;
+        list)    flow_history ;;
+        diag)    flow_diagnostics ;;
+        reset)   flow_reset_adb ;;
+    esac
+}
+
+# Allow sourcing for tests
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
+
