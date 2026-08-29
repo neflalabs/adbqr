@@ -1,6 +1,9 @@
 #compdef adbqr
 
 _adbqr() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
     _arguments -s -S \
         '(-w --wizard)'{-w,--wizard}'[Buka menu wizard TUI interaktif]' \
         '(-p --pair)'{-p,--pair}'[Pairing via QR Code dan auto-connect]' \
@@ -18,9 +21,20 @@ _adbqr() {
         '(-t --timeout)'{-t,--timeout}'[Set timeout deteksi mDNS (detik)]:detik:(10 30 60 120)' \
         '(-v --version)'{-v,--version}'[Tampilkan informasi versi & pembuat]' \
         '(-h --help)'{-h,--help}'[Tampilkan bantuan]' \
-        '1:action:((update\:"Periksa dan pasang pembaruan terbaru dari GitHub"))' \
-        '*:scrcpy arguments:_default'
+        '::subcommand:->subcmd' \
+        '*:scrcpy arguments:_default' && return 0
+
+    case "$state" in
+        subcmd)
+            local -a subcmds
+            subcmds=(
+                'update:Periksa dan pasang pembaruan terbaru dari GitHub'
+            )
+            _describe -t commands 'perintah' subcmds
+            ;;
+    esac
 }
 
 _adbqr "$@"
+
 
