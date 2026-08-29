@@ -850,6 +850,114 @@ flow_reset_adb() {
     adb devices -l
 }
 
+# Mode 8: Self-updater from GitHub
+flow_update() {
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GREEN}${BOLD}                   MEMERIKSA PEMBARUAN ADBQR                      ${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    if ! command -v curl >/dev/null 2>&1; then
+        die "'curl' diperlukan untuk mengunduh pembaruan. Silakan install curl terlebih dahulu."
+    fi
+
+    info "Memeriksa versi terbaru dari GitHub repository..."
+    local repo_url="https://raw.githubusercontent.com/neflalabs/adbqr/main"
+    local remote_content
+    remote_content=$(curl -fsSL "$repo_url/bin/adbqr" 2>/dev/null) || die "Gagal menghubungi GitHub repository. Periksa koneksi internet Anda."
+
+    local remote_ver
+    remote_ver=$(echo "$remote_content" | grep '^VERSION=' | head -n 1 | cut -d'"' -f2 || true)
+
+    if [ -z "$remote_ver" ]; then
+        die "Gagal membaca informasi versi dari repository remote."
+    fi
+
+    echo -e "  Versi Terpasang : ${BOLD}$VERSION${RESET}"
+    echo -e "  Versi Terbaru   : ${GREEN}${BOLD}$remote_ver${RESET}"
+    echo ""
+
+    if [ "$VERSION" = "$remote_ver" ]; then
+        success "adbqr sudah dalam versi terbaru (${GREEN}$VERSION${RESET}). Tidak ada pembaruan."
+        return 0
+    fi
+
+    info "Mengunduh pembaruan versi ${GREEN}$remote_ver${RESET}..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/adbqr-update.XXXXXX")
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp_dir' 2>/dev/null || true" RETURN
+
+    local tmp_bin="$tmp_dir/adbqr"
+    echo "$remote_content" > "$tmp_bin"
+    chmod +x "$tmp_bin"
+
+    # Validate syntax before installing
+    if ! bash -n "$tmp_bin" 2>/dev/null; then
+        die "Validasi skrip pembaruan gagal (syntax error). Update dibatalkan demi keamanan."
+    fi
+
+    # Find the target binary location
+    local target_bin
+    target_bin=$(command -v adbqr 2>/dev/null || true)
+    if [ -z "$target_bin" ] || [ ! -f "$target_bin" ]; then
+        target_bin="/usr/local/bin/adbqr"
+    fi
+
+    # Resolve symlinks if needed
+    if [ -L "$target_bin" ]; then
+        target_bin=$(readlink -f "$target_bin" 2>/dev/null || echo "$target_bin")
+    fi
+
+    info "Memasang adbqr ke $target_bin ..."
+    if [ -w "$target_bin" ] || [ -w "$(dirname "$target_bin")" ]; then
+        install -m 0755 "$tmp_bin" "$target_bin"
+    elif command -v sudo >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] Memerlukan izin sudo untuk memperbarui $target_bin:${RESET}"
+        sudo install -m 0755 "$tmp_bin" "$target_bin"
+    else
+        die "Tidak memiliki izin menulis ke $target_bin dan 'sudo' tidak ditemukan."
+    fi
+
+    # Update shell completions if directories exist
+    curl -fsSL "$repo_url/completions/adbqr.bash" -o "$tmp_dir/adbqr.bash" 2>/dev/null || true
+    curl -fsSL "$repo_url/completions/_adbqr" -o "$tmp_dir/_adbqr" 2>/dev/null || true
+    curl -fsSL "$repo_url/completions/adbqr.fish" -o "$tmp_dir/adbqr.fish" 2>/dev/null || true
+
+    for bash_dir in /usr/share/bash-completion/completions /etc/bash_completion.d; do
+        if [ -d "$bash_dir" ] && [ -f "$tmp_dir/adbqr.bash" ]; then
+            if [ -w "$bash_dir" ]; then
+                install -m 0644 "$tmp_dir/adbqr.bash" "$bash_dir/adbqr" 2>/dev/null || true
+            elif command -v sudo >/dev/null 2>&1; then
+                sudo install -m 0644 "$tmp_dir/adbqr.bash" "$bash_dir/adbqr" 2>/dev/null || true
+            fi
+            break
+        fi
+    done
+
+    local zsh_dir="/usr/share/zsh/site-functions"
+    if [ -d "$zsh_dir" ] && [ -f "$tmp_dir/_adbqr" ]; then
+        if [ -w "$zsh_dir" ]; then
+            install -m 0644 "$tmp_dir/_adbqr" "$zsh_dir/_adbqr" 2>/dev/null || true
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo install -m 0644 "$tmp_dir/_adbqr" "$zsh_dir/_adbqr" 2>/dev/null || true
+        fi
+    fi
+
+    local fish_dir="/usr/share/fish/vendor_completions.d"
+    if [ -d "$fish_dir" ] && [ -f "$tmp_dir/adbqr.fish" ]; then
+        if [ -w "$fish_dir" ]; then
+            install -m 0644 "$tmp_dir/adbqr.fish" "$fish_dir/adbqr.fish" 2>/dev/null || true
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo install -m 0644 "$tmp_dir/adbqr.fish" "$fish_dir/adbqr.fish" 2>/dev/null || true
+        fi
+    fi
+
+    echo ""
+    success "adbqr berhasil diperbarui ke versi ${GREEN}${BOLD}$remote_ver${RESET}!"
+}
+
 # Interactive Wizard Menu
 flow_wizard_menu() {
     while true; do
@@ -871,9 +979,10 @@ flow_wizard_menu() {
         echo -e "  ${BOLD}[6]${RESET} Riwayat Perangkat (History)"
         echo -e "  ${BOLD}[7]${RESET} System Diagnostics (Cek Avahi, Firewall, & Paket Fedora)"
         echo -e "  ${BOLD}[8]${RESET} Reset / Restart ADB Server"
+        echo -e "  ${BOLD}[9]${RESET} Cek Pembaruan (Update adbqr)"
         echo -e "  ${BOLD}[0]${RESET} Keluar"
         echo -e "${CYAN}------------------------------------------------------------------${RESET}"
-        echo -ne "Pilih menu [1-8, 0]: "
+        echo -ne "Pilih menu [1-9, 0]: "
         local opt
         read -r opt || true
         echo ""
@@ -891,6 +1000,7 @@ flow_wizard_menu() {
             6) flow_history ;;
             7) flow_diagnostics ;;
             8) flow_reset_adb ;;
+            9) flow_update ;;
             0|q|Q) echo "Sampai jumpa!"; exit 0 ;;
             *) warn "Pilihan tidak valid, silakan coba lagi." ;;
         esac
@@ -922,6 +1032,7 @@ Modes & Actions:
   -l, --list              List known device history (~/.config/adbqr/).
   -d, --diag              Run Linux/Fedora diagnostics (Avahi, firewall, ADB).
   -r, --reset             Restart ADB server and disconnect wireless devices.
+  -U, --update, update    Check for and install updates from GitHub.
 
 Mirroring & Streaming Options (scrcpy):
   -s, --screen            Auto-launch scrcpy mirror screen after connecting (Smooth Wi-Fi preset).
@@ -947,6 +1058,7 @@ Examples:
   adbqr -s -- -b 2M --stay-awake   # Pass raw flags to scrcpy via '--'
   adbqr -w                         # Interactive wizard menu
   adbqr -u                         # 1-Click USB to Wireless switch
+  adbqr update                     # Check and install updates
 EOF
 }
 
@@ -960,6 +1072,7 @@ main() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
+            update|--update|-U) action="update" ;;
             -w|--wizard)      action="wizard" ;;
             -p|--pair)        action="pair" ;;
             -c|--connect)     action="connect" ;;
@@ -1016,6 +1129,7 @@ main() {
         list)    flow_history ;;
         diag)    flow_diagnostics ;;
         reset)   flow_reset_adb ;;
+        update)  flow_update ;;
     esac
 }
 

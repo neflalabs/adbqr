@@ -6,7 +6,7 @@ _adbqr_completions() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    opts="-w --wizard -p --pair -c --connect -s --screen -b --bitrate --screen-off --off --scrcpy-args -u --usb -m --manual -l --list -d --diag -r --reset -t --timeout -v --version -h --help"
+    opts="update -U --update -w --wizard -p --pair -c --connect -s --screen -b --bitrate --screen-off --off --scrcpy-args -u --usb -m --manual -l --list -d --diag -r --reset -t --timeout -v --version -h --help"
 
     case "$prev" in
         -t|--timeout)
@@ -24,6 +24,9 @@ _adbqr_completions() {
 
     if [[ "$cur" == -* ]]; then
         mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
+        return 0
+    else
+        mapfile -t COMPREPLY < <(compgen -W "update $opts" -- "$cur")
         return 0
     fi
 }

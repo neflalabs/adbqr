@@ -11,6 +11,8 @@ complete -c adbqr -s m -l manual -d "Pairing manual dengan 6-digit code & IP:Por
 complete -c adbqr -s l -l list -d "Lihat riwayat perangkat tersimpan"
 complete -c adbqr -s d -l diag -d "Jalankan diagnostik sistem & firewall"
 complete -c adbqr -s r -l reset -d "Restart ADB server & disconnect perangkat"
+complete -c adbqr -s U -l update -d "Periksa dan pasang pembaruan terbaru dari GitHub"
+complete -c adbqr -a "update" -d "Periksa dan pasang pembaruan terbaru dari GitHub"
 
 # Mirroring & Streaming
 complete -c adbqr -s s -l screen -d "Auto-launch scrcpy mirror screen setelah konek"

@@ -16,6 +16,7 @@ Tool CLI & Wizard Linux untuk menghubungkan **Android Wireless Debugging** (Andr
 - 🔔 **Notifikasi Desktop**: Mengirim notifikasi sistem saat HP berhasil tersambung.
 - 🔌 **1-Click USB to Wireless**: Beralih dari mode kabel USB ke Wireless ADB (`adb tcpip 5555`) dalam satu langkah.
 - 📜 **Device History**: Menyimpan riwayat IP & perangkat yang pernah terhubung di `~/.config/adbqr/`.
+- 🔄 **Self-Updater**: Perbarui tool dan auto-completions langsung dari GitHub dengan `adbqr update`.
 - ⌨️ **Shell Auto-Completion**: Dukungan autocomplete TAB untuk **Bash**, **Zsh**, dan **Fish**.
 - 🖼️ **Dukungan Terminal Luas**: Rendering gambar beresolusi tinggi di terminal Ghostty/Kitty/WezTerm serta fallback ANSI UTF-8 untuk terminal standar.
 
@@ -75,6 +76,7 @@ adbqr -m              # Pairing manual dengan 6-digit code & IP:Port
 adbqr -l              # Lihat riwayat perangkat tersimpan
 adbqr -d              # Diagnostik sistem, firewall, dan status mDNS
 adbqr -r              # Putus koneksi & restart ADB server
+adbqr update          # Periksa & unduh pembaruan adbqr dari GitHub
 adbqr -v              # Tampilkan versi & info pembuat
 ```
 

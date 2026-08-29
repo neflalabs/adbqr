@@ -15,6 +15,7 @@ _adbqr() {
         '(-l --list)'{-l,--list}'[Lihat riwayat perangkat tersimpan]'
         '(-d --diag)'{-d,--diag}'[Jalankan diagnostik sistem & firewall]'
         '(-r --reset)'{-r,--reset}'[Restart ADB server & disconnect perangkat]'
+        '(-U --update update)'{-U,--update,update}'[Periksa dan pasang pembaruan terbaru dari GitHub]'
         '(-t --timeout)'{-t,--timeout}'[Set timeout deteksi mDNS (detik)]:detik:(10 30 60 120)'
         '(-v --version)'{-v,--version}'[Tampilkan informasi versi & pembuat]'
         '(-h --help)'{-h,--help}'[Tampilkan bantuan]'
