@@ -45,7 +45,7 @@ else
 fi
 
 # Remove completions
-for comp in /etc/bash_completion.d/adbqr /usr/share/bash-completion/completions/adbqr /usr/share/zsh/site-functions/_adbqr; do
+for comp in /etc/bash_completion.d/adbqr /usr/share/bash-completion/completions/adbqr /usr/share/zsh/site-functions/_adbqr /usr/share/fish/vendor_completions.d/adbqr.fish; do
     if [ -f "$comp" ]; then
         if [ -w "$comp" ]; then
             rm -f "$comp" 2>/dev/null || true

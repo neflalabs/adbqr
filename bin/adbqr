@@ -12,7 +12,6 @@
 # - Desktop notifications via notify-send
 # - Smart device history cache in ~/.config/adbqr/
 # - 1-Click USB-to-Wireless switch (adb tcpip 5555)
-# - Wayland/X11 clipboard integration (wl-copy / xclip)
 # - Clean Ctrl+C / SIGINT signal cancellation
 # - Smooth terminal spinner and graphics protocol support (Kitty, iTerm2, ANSI)
 
@@ -24,8 +23,12 @@ if [ "$(uname)" != "Linux" ]; then
     exit 1
 fi
 
+VERSION="2026.08.29-v1.0.0"
 TIMEOUT=60
 LAUNCH_SCRCPY=false
+SCRCPY_BITRATE=""
+SCRCPY_SCREEN_OFF=false
+SCRCPY_CUSTOM_ARGS=()
 NAME=""
 CODE=""
 PAYLOAD=""
@@ -155,26 +158,52 @@ get_wifi_ssid() {
     echo "$ssid"
 }
 
-# Copy text to clipboard if wl-copy or xclip is available
-copy_to_clipboard() {
-    local text="$1"
-    if command -v wl-copy >/dev/null 2>&1 && [ -n "${WAYLAND_DISPLAY:-}" ]; then
-        echo -n "$text" | wl-copy 2>/dev/null || true
-        echo -e "  ${DIM}📋 Disalin ke clipboard: ${CYAN}$text${RESET}"
-    elif command -v xclip >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
-        echo -n "$text" | xclip -selection clipboard 2>/dev/null || true
-        echo -e "  ${DIM}📋 Disalin ke clipboard: ${CYAN}$text${RESET}"
-    fi
-}
 
-# Launch scrcpy if requested
+# Launch scrcpy if requested with smooth wireless optimizations
 maybe_launch_scrcpy() {
     local serial="$1"
     if [ "$LAUNCH_SCRCPY" = true ]; then
         if command -v scrcpy >/dev/null 2>&1; then
             echo ""
-            info "Membuka screen mirroring (${BOLD}scrcpy -s $serial${RESET})..."
-            scrcpy -s "$serial" >/dev/null 2>&1 &
+            local cmd_args=("-s" "$serial")
+
+            # Default smooth wireless tuning for stable low-latency streaming:
+            # - video-buffer=50 (jitter buffer to prevent micro-stutters)
+            # - audio-buffer=50 (smooth audio streaming)
+            # - max-size=1280 (limit resolution to prevent Wi-Fi bandwidth exhaustion)
+            # - max-fps=60 (cap 60fps to prevent 90/120Hz saturation)
+            cmd_args+=(
+                "--video-buffer=50"
+                "--audio-buffer=50"
+                "--max-size=1280"
+                "--max-fps=60"
+            )
+
+            # Bitrate configuration (default 6M for wireless if not specified)
+            if [ -n "$SCRCPY_BITRATE" ]; then
+                cmd_args+=("--video-bit-rate=$SCRCPY_BITRATE")
+            else
+                cmd_args+=("--video-bit-rate=6M")
+            fi
+
+            # Screen-off shortcut
+            if [ "$SCRCPY_SCREEN_OFF" = true ]; then
+                cmd_args+=("--turn-screen-off" "--stay-awake")
+            fi
+
+            # SCRCPY_ARGS environment variable support
+            if [ -n "${SCRCPY_ARGS:-}" ]; then
+                eval "local env_opts=($SCRCPY_ARGS)"
+                cmd_args+=("${env_opts[@]}")
+            fi
+
+            # Passthrough custom args (--scrcpy-args or trailing --)
+            if [ ${#SCRCPY_CUSTOM_ARGS[@]} -gt 0 ]; then
+                cmd_args+=("${SCRCPY_CUSTOM_ARGS[@]}")
+            fi
+
+            info "Membuka screen mirroring (${BOLD}scrcpy ${cmd_args[*]}${RESET})..."
+            scrcpy "${cmd_args[@]}" >/dev/null 2>&1 &
         else
             warn "scrcpy belum terinstall. Jalankan: ${BOLD}$(install_hint scrcpy)${RESET}"
         fi
@@ -223,7 +252,7 @@ save_device_history() {
     tmp_hist=$(mktemp "${TMPDIR:-/tmp}/adbqr-hist.XXXXXX")
     if [ -f "$HISTORY_FILE" ]; then
         # Remove existing entry for same IP to avoid duplicates
-        grep -v "$ip" "$HISTORY_FILE" > "$tmp_hist" 2>/dev/null || true
+        awk -F'\t' -v target_ip="$ip" '$2 != target_ip' "$HISTORY_FILE" > "$tmp_hist" 2>/dev/null || true
     fi
     printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$timestamp" "$ip" "$port" "$model" "$os_ver" "$s_name" >> "$tmp_hist"
     mv "$tmp_hist" "$HISTORY_FILE"
@@ -436,7 +465,6 @@ auto_connect_device() {
                 echo -e "  📱 ${BOLD}Perangkat:${RESET} ${GREEN}${model:-Android Device}${RESET} (${CYAN}${os_ver:-Android}${RESET})"
             fi
             save_device_history "$target_ip" "${connect_addr##*:}" "$model" "$os_ver" ""
-            copy_to_clipboard "adb connect $connect_addr"
             notify_desktop "Android Terhubung!" "${model:-Perangkat} ($os_ver) @ $connect_addr"
             echo ""
             adb devices -l
@@ -457,7 +485,6 @@ auto_connect_device() {
         info "Menghubungkan ke $full_addr ..."
         if adb connect "$full_addr"; then
             save_device_history "$target_ip" "$manual_port" "$model" "$os_ver" ""
-            copy_to_clipboard "adb connect $full_addr"
             notify_desktop "Android Terhubung!" "${model:-Perangkat} @ $full_addr"
             echo ""
             adb devices -l
@@ -577,7 +604,6 @@ flow_quick_connect() {
         if [ -n "$manual_addr" ]; then
             info "Menghubungkan ke $manual_addr ..."
             if adb connect "$manual_addr"; then
-                copy_to_clipboard "adb connect $manual_addr"
                 notify_desktop "Android Terhubung!" "Alamat: $manual_addr"
                 maybe_launch_scrcpy "$manual_addr"
             fi
@@ -606,7 +632,6 @@ flow_quick_connect() {
             info "Connecting $addr ..."
             if adb connect "$addr"; then
                 save_device_history "${addr%%:*}" "${addr##*:}" "${models[$i]}" "" ""
-                copy_to_clipboard "adb connect $addr"
                 connected_target="$addr"
             fi
         done
@@ -617,7 +642,6 @@ flow_quick_connect() {
             info "Connecting $addr ..."
             if adb connect "$addr"; then
                 save_device_history "${addr%%:*}" "${addr##*:}" "${models[$sel]}" "" ""
-                copy_to_clipboard "adb connect $addr"
                 connected_target="$addr"
             fi
         else
@@ -684,7 +708,6 @@ flow_usb_to_wireless() {
             success "Berhasil beralih ke mode Wireless ADB!"
             echo -e "  🎉 ${BOLD}Anda sekarang dapat mencabut kabel USB!${RESET}"
             save_device_history "$phone_ip" "5555" "$model" "Android $os_ver" ""
-            copy_to_clipboard "adb connect $phone_ip:5555"
             notify_desktop "Wireless ADB Aktif!" "$model terhubung ke $phone_ip:5555"
             echo ""
             adb devices -l
@@ -758,7 +781,7 @@ flow_diagnostics() {
     echo ""
 
     echo -e "${BOLD}1. Tool Checks:${RESET}"
-    for tool in adb qrencode avahi-browse firewall-cmd ip nmcli wl-copy scrcpy notify-send; do
+    for tool in adb qrencode avahi-browse firewall-cmd ip nmcli scrcpy notify-send; do
         if command -v "$tool" >/dev/null 2>&1; then
             echo -e "   [✓] $tool: ${GREEN}$(command -v "$tool")${RESET}"
         else
@@ -874,55 +897,115 @@ flow_wizard_menu() {
     done
 }
 
+show_version() {
+    echo -e "${CYAN}${BOLD}adbqr${RESET} version ${GREEN}${VERSION}${RESET}"
+    echo -e "Android Wireless Debugging Wizard & QR Pairer for Linux"
+    echo ""
+    echo -e "  ${BOLD}Created by:${RESET}  Neflalabs"
+    echo -e "  ${BOLD}Website:${RESET}     https://npx.my.id"
+    echo -e "  ${BOLD}GitHub:${RESET}      https://github.com/neflalabs/adbqr"
+    echo -e "  ${BOLD}Instagram:${RESET}   @neflalabs (https://instagram.com/neflalabs)"
+}
+
 usage() {
     cat <<'EOF'
-Usage: adbqr [OPTIONS]
+Usage: adbqr [OPTIONS] [-- [SCRCPY_OPTIONS...]]
 
-Android Wireless Debugging tool & wizard for pairing Fedora/Linux to Android 11-16.
+Android Wireless Debugging tool & wizard for Linux & Android 11-16+.
 
-Options:
-  -w, --wizard        Launch the interactive wizard menu.
-  -p, --pair          Pair a new device using QR code (default action).
-  -c, --connect       Quick-connect to an active wireless device via mDNS.
-  -s, --screen        Auto-launch scrcpy mirror screen after connecting.
-  -u, --usb           Switch a connected USB device to Wireless ADB (port 5555).
-  -m, --manual        Pair manually using 6-digit pairing code and IP:Port.
-  -l, --list          List known device history.
-  -d, --diag          Run Fedora/system diagnostics (Avahi, firewall, ADB).
-  -r, --reset         Restart ADB server and disconnect wireless devices.
-  -t, --timeout SEC   Set mDNS discovery timeout in seconds (default: 60).
-  -h, --help          Show this help message.
+Modes & Actions:
+  -p, --pair              Pair a new device using QR code and auto-connect.
+  -c, --connect           Quick-connect to an active wireless device via mDNS.
+  -w, --wizard            Launch the interactive TUI wizard menu.
+  -u, --usb               Switch a connected USB device to Wireless ADB (port 5555).
+  -m, --manual            Pair manually using 6-digit pairing code and IP:Port.
+  -l, --list              List known device history (~/.config/adbqr/).
+  -d, --diag              Run Linux/Fedora diagnostics (Avahi, firewall, ADB).
+  -r, --reset             Restart ADB server and disconnect wireless devices.
+
+Mirroring & Streaming Options (scrcpy):
+  -s, --screen            Auto-launch scrcpy mirror screen after connecting (Smooth Wi-Fi preset).
+  -b, --bitrate RATE      Set custom scrcpy video bitrate (e.g. 2M, 4M, 6M, 8M).
+      --screen-off, --off Turn off device screen while mirroring (--turn-screen-off --stay-awake).
+      --scrcpy-args ARGS  Pass custom raw arguments string to scrcpy.
+  -- [SCRCPY_OPTIONS...]  Pass all trailing arguments directly to scrcpy.
+
+General Options:
+  -t, --timeout SEC       Set mDNS discovery timeout in seconds (default: 60).
+  -v, --version           Show version information and credits.
+  -h, --help              Show this help message.
+
+Environment Variables:
+  SCRCPY_ARGS             Default arguments passed to scrcpy (e.g. export SCRCPY_ARGS="-b 4M").
 
 Examples:
-  adbqr               # Quick QR pairing & auto-connect (default)
-  adbqr -s            # Pair/connect and immediately launch scrcpy
-  adbqr --wizard      # Full interactive wizard menu
-  adbqr --connect     # Auto-connect to existing wireless device
-  adbqr --usb         # Convert USB device to wireless mode
-  adbqr --diag        # Check firewall and mDNS status
+  adbqr -p                         # Pair new device with QR code
+  adbqr -c                         # Quick connect to paired device
+  adbqr -s                         # QR pair + smooth screen mirroring
+  adbqr -c -s                      # Quick connect + smooth screen mirroring
+  adbqr -c -s -b 2M --screen-off   # Quick connect + 2M bitrate + turn screen off
+  adbqr -s -- -b 2M --stay-awake   # Pass raw flags to scrcpy via '--'
+  adbqr -w                         # Interactive wizard menu
+  adbqr -u                         # 1-Click USB to Wireless switch
 EOF
 }
 
 main() {
-    local action="pair"
+    if [ $# -eq 0 ]; then
+        usage
+        return 0
+    fi
+
+    local action=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            -w|--wizard)  action="wizard" ;;
-            -p|--pair)    action="pair" ;;
-            -c|--connect) action="connect" ;;
-            -s|--screen)  LAUNCH_SCRCPY=true ;;
-            -u|--usb)     action="usb" ;;
-            -m|--manual)  action="manual" ;;
-            -l|--list)    action="list" ;;
-            -d|--diag)    action="diag" ;;
-            -r|--reset)   action="reset" ;;
-            -t|--timeout) shift; TIMEOUT="${1:-60}" ;;
-            -h|--help)    usage; return 0 ;;
-            *) usage >&2; return 2 ;;
+            -w|--wizard)      action="wizard" ;;
+            -p|--pair)        action="pair" ;;
+            -c|--connect)     action="connect" ;;
+            -s|--screen)      LAUNCH_SCRCPY=true ;;
+            -b|--bitrate)
+                shift
+                [ $# -gt 0 ] || die "Nilai bitrate harus ditentukan (contoh: -b 2M)."
+                SCRCPY_BITRATE="$1"
+                LAUNCH_SCRCPY=true
+                ;;
+            --screen-off|--off)
+                SCRCPY_SCREEN_OFF=true
+                LAUNCH_SCRCPY=true
+                ;;
+            --scrcpy-args)
+                shift
+                [ $# -gt 0 ] || die "Argumen scrcpy harus ditentukan (contoh: --scrcpy-args=\"-b 2M --turn-screen-off\")."
+                eval "local parsed_args=($1)"
+                SCRCPY_CUSTOM_ARGS+=("${parsed_args[@]}")
+                LAUNCH_SCRCPY=true
+                ;;
+            --)
+                shift
+                SCRCPY_CUSTOM_ARGS+=("$@")
+                LAUNCH_SCRCPY=true
+                break
+                ;;
+            -u|--usb)         action="usb" ;;
+            -m|--manual)      action="manual" ;;
+            -l|--list)        action="list" ;;
+            -d|--diag)        action="diag" ;;
+            -r|--reset)       action="reset" ;;
+            -t|--timeout)
+                shift
+                [ $# -gt 0 ] || die "Nilai timeout harus ditentukan (contoh: -t 60)."
+                TIMEOUT="${1:-60}"
+                ;;
+            -v|--version)     show_version; return 0 ;;
+            -h|--help)        usage; return 0 ;;
+            *)                usage >&2; return 2 ;;
         esac
         shift
     done
+
+    # Default action to 'pair' if an option like -s was given without explicit mode
+    action="${action:-pair}"
 
     case "$action" in
         wizard)  flow_wizard_menu ;;

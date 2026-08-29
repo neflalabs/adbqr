@@ -14,10 +14,9 @@ Tool CLI & Wizard Linux untuk menghubungkan **Android Wireless Debugging** (Andr
 - 🔄 **Auto-Connect**: Otomatis mencari port debugging dan langsung menghubungkan perangkat setelah pairing sukses.
 - 🖥️ **Integrasi scrcpy (`-s` / `--screen`)**: Otomatis membuka mirror layar HP segera setelah terhubung.
 - 🔔 **Notifikasi Desktop**: Mengirim notifikasi sistem saat HP berhasil tersambung.
-- 📋 **Integrasi Clipboard**: Perintah `adb connect` otomatis disalin ke clipboard Wayland (`wl-copy`) / X11 (`xclip`).
 - 🔌 **1-Click USB to Wireless**: Beralih dari mode kabel USB ke Wireless ADB (`adb tcpip 5555`) dalam satu langkah.
 - 📜 **Device History**: Menyimpan riwayat IP & perangkat yang pernah terhubung di `~/.config/adbqr/`.
-- ⌨️ **Shell Auto-Completion**: Dukungan autocomplete TAB untuk **Bash** dan **Zsh**.
+- ⌨️ **Shell Auto-Completion**: Dukungan autocomplete TAB untuk **Bash**, **Zsh**, dan **Fish**.
 - 🖼️ **Dukungan Terminal Luas**: Rendering gambar beresolusi tinggi di terminal Ghostty/Kitty/WezTerm serta fallback ANSI UTF-8 untuk terminal standar.
 
 ---
@@ -63,22 +62,32 @@ sudo ./uninstall.sh --purge
 ## 💻 Penggunaan
 
 ```sh
-adbqr                 # Scan QR code & auto-connect (Mode default)
-adbqr -s              # Konek wireless & langsung buka mirror scrcpy
-adbqr --wizard        # Menu TUI Wizard interaktif
-adbqr --connect       # Hubungkan ke perangkat aktif di Wi-Fi
-adbqr --usb           # Ubah koneksi kabel USB ke Wi-Fi (port 5555)
-adbqr --manual        # Pairing manual dengan 6-digit code & IP:Port
-adbqr --list          # Lihat riwayat perangkat tersimpan
-adbqr --diag          # Diagnostik sistem, firewall, dan status mDNS
-adbqr --reset         # Putus koneksi & restart ADB server
-adbqr --help          # Bantuan & opsi lengkap
+adbqr                 # Menampilkan menu bantuan (help)
+adbqr -p              # Scan QR code & auto-connect
+adbqr -w              # Menu TUI Wizard interaktif
+adbqr -c              # Quick-connect ke perangkat aktif di Wi-Fi
+adbqr -u              # Ubah koneksi kabel USB ke Wi-Fi (port 5555)
+adbqr -s              # Konek & otomatis buka mirror scrcpy (Smooth Wi-Fi preset)
+adbqr -c -s -b 2M     # Quick connect + scrcpy bitrate 2M
+adbqr -s --screen-off # Konek + scrcpy dengan layar HP mati (--turn-screen-off)
+adbqr -s -- -b 2M --stay-awake # Teruskan argumen mentah ke scrcpy via '--'
+adbqr -m              # Pairing manual dengan 6-digit code & IP:Port
+adbqr -l              # Lihat riwayat perangkat tersimpan
+adbqr -d              # Diagnostik sistem, firewall, dan status mDNS
+adbqr -r              # Putus koneksi & restart ADB server
+adbqr -v              # Tampilkan versi & info pembuat
 ```
 
 ### 📱 Langkah di HP Android:
 1. Buka **Settings** > **Developer options**.
 2. Aktifkan **Wireless debugging** lalu ketuk menu tersebut.
 3. Pilih **Pair device with QR code** dan arahkan kamera HP ke QR di terminal.
+
+### ⚡ Mirroring Lancar di Wi-Fi (`scrcpy`)
+Secara default saat menggunakan flag `-s`, `adbqr` menerapkan tuning optimal untuk koneksi nirkabel (jitter buffer 50ms, cap 60 FPS, max resolution 1280px) agar streaming mulus tanpa patah-patah / micro-stutters. Anda juga bisa mengatur default argumen melalui environment variable:
+```sh
+export SCRCPY_ARGS="-b 4M --video-buffer=50 --turn-screen-off"
+```
 
 ---
 
