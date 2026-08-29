@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/install.sh | b
 curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/uninstall.sh | bash
 
 # Uninstall beserta hapus riwayat & config (~/.config/adbqr)
-curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/uninstall.sh | bash -s --purge
+curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/uninstall.sh | bash -s -- --purge
 ```
 
 ### Atau via Clone Repo Manual
