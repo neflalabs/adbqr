@@ -46,6 +46,15 @@ sudo pacman -S android-tools qrencode avahi
 curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/install.sh | bash
 ```
 
+### One-line Uninstall
+```sh
+# Uninstall standar
+curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/uninstall.sh | bash
+
+# Uninstall beserta hapus riwayat & config (~/.config/adbqr)
+curl -fsSL https://raw.githubusercontent.com/neflalabs/adbqr/main/uninstall.sh | bash -s -- --purge
+```
+
 ### Atau via Clone Repo Manual
 ```sh
 # Install ke /usr/local/bin (beserta shell completions)
