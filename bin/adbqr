@@ -861,16 +861,33 @@ flow_update() {
         die "'curl' diperlukan untuk mengunduh pembaruan. Silakan install curl terlebih dahulu."
     fi
 
-    info "Memeriksa versi terbaru dari GitHub repository..."
-    local repo_url="https://raw.githubusercontent.com/neflalabs/adbqr/main"
-    local remote_content
-    remote_content=$(curl -fsSL "$repo_url/bin/adbqr" 2>/dev/null) || die "Gagal menghubungi GitHub repository. Periksa koneksi internet Anda."
+    info "Memeriksa versi terbaru dari GitHub Releases..."
+    local api_url="https://api.github.com/repos/neflalabs/adbqr/releases/latest"
+    local raw_base="https://raw.githubusercontent.com/neflalabs/adbqr"
+    local remote_ver=""
+    local download_ref="main"
 
-    local remote_ver
-    remote_ver=$(echo "$remote_content" | grep '^VERSION=' | head -n 1 | cut -d'"' -f2 || true)
+    # 1. Query GitHub Releases API for latest release tag
+    local release_json
+    release_json=$(curl -fsSL -H "Accept: application/vnd.github.v3+json" "$api_url" 2>/dev/null || true)
+    if [ -n "$release_json" ]; then
+        remote_ver=$(echo "$release_json" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
+        if [ -n "$remote_ver" ]; then
+            download_ref="$remote_ver"
+        fi
+    fi
 
+    # 2. Fallback to checking VERSION in raw main script if GitHub Releases not yet published
+    local remote_content=""
     if [ -z "$remote_ver" ]; then
-        die "Gagal membaca informasi versi dari repository remote."
+        remote_content=$(curl -fsSL "$raw_base/main/bin/adbqr" 2>/dev/null || true)
+        remote_ver=$(echo "$remote_content" | grep '^VERSION=' | head -n 1 | cut -d'"' -f2 || true)
+    else
+        remote_content=$(curl -fsSL "$raw_base/${download_ref}/bin/adbqr" 2>/dev/null || true)
+    fi
+
+    if [ -z "$remote_ver" ] || [ -z "$remote_content" ]; then
+        die "Gagal memeriksa informasi versi dari GitHub. Periksa koneksi internet Anda."
     fi
 
     echo -e "  Versi Terpasang : ${BOLD}$VERSION${RESET}"
@@ -882,7 +899,7 @@ flow_update() {
         return 0
     fi
 
-    info "Mengunduh pembaruan versi ${GREEN}$remote_ver${RESET}..."
+    info "Mengunduh pembaruan versi ${GREEN}$remote_ver${RESET} (ref: $download_ref)..."
 
     local tmp_dir
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/adbqr-update.XXXXXX")
@@ -920,10 +937,10 @@ flow_update() {
         die "Tidak memiliki izin menulis ke $target_bin dan 'sudo' tidak ditemukan."
     fi
 
-    # Update shell completions if directories exist
-    curl -fsSL "$repo_url/completions/adbqr.bash" -o "$tmp_dir/adbqr.bash" 2>/dev/null || true
-    curl -fsSL "$repo_url/completions/_adbqr" -o "$tmp_dir/_adbqr" 2>/dev/null || true
-    curl -fsSL "$repo_url/completions/adbqr.fish" -o "$tmp_dir/adbqr.fish" 2>/dev/null || true
+    # Update shell completions from the release ref
+    curl -fsSL "$raw_base/${download_ref}/completions/adbqr.bash" -o "$tmp_dir/adbqr.bash" 2>/dev/null || true
+    curl -fsSL "$raw_base/${download_ref}/completions/_adbqr" -o "$tmp_dir/_adbqr" 2>/dev/null || true
+    curl -fsSL "$raw_base/${download_ref}/completions/adbqr.fish" -o "$tmp_dir/adbqr.fish" 2>/dev/null || true
 
     for bash_dir in /usr/share/bash-completion/completions /etc/bash_completion.d; do
         if [ -d "$bash_dir" ] && [ -f "$tmp_dir/adbqr.bash" ]; then
